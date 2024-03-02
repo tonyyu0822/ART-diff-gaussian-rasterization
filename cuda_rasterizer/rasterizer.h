@@ -39,6 +39,8 @@ namespace CudaRasterizer
 			const float* shs,
 			const float* colors_precomp,
 			const float* opacities,
+			float* weights,
+			int* weights_cnt,			
 			const float* scales,
 			const float scale_modifier,
 			const float* rotations,
@@ -49,7 +51,10 @@ namespace CudaRasterizer
 			const float tan_fovx, float tan_fovy,
 			const bool prefiltered,
 			float* out_color,
-			int* radii = nullptr,
+			float* out_depth,
+			float* out_xy, 
+			float* masks,//ty
+			int* radii = nullptr, 
 			bool debug = false);
 
 		static void backward(
@@ -72,6 +77,8 @@ namespace CudaRasterizer
 			char* binning_buffer,
 			char* image_buffer,
 			const float* dL_dpix,
+			const float* dL_depths,
+			const float* dL_xys, 
 			float* dL_dmean2D,
 			float* dL_dconic,
 			float* dL_dopacity,
