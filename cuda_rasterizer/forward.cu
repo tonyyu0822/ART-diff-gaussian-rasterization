@@ -189,9 +189,8 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	tiles_touched[idx] = 0;
 
 	// Perform near culling, quit if outside.
-	float dist = 0.0f;
 	float3 p_view;
-	if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view, dist))
+	if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view))
 		return;
 
 	// Transform point by projecting
@@ -246,9 +245,9 @@ __global__ void preprocessCUDA(int P, int D, int M,
 		rgb[idx * C + 1] = result.y;
 		rgb[idx * C + 2] = result.z;
 	}
-	
+
 	// Store some useful helper data for the next steps.
-	depths[idx] = dist; // glm::length(glm::vec3(p_view.x, p_view.y, p_view.z)); // p_view.z
+	depths[idx] = p_view.z;
 	radii[idx] = my_radius;
 	points_xy_image[idx] = point_image;
 	// Inverse 2D covariance and opacity neatly pack into one float4
@@ -267,17 +266,15 @@ renderCUDA(
 	int W, int H,
 	const float2* __restrict__ points_xy_image,
 	const float* __restrict__ features,
-	const float* __restrict__ depths,
 	const float4* __restrict__ conic_opacity,
-	float* __restrict__ weights,
-	int* __restrict__ weights_cnt,
+	const float* altitude,
+	float* __restrict__ weights_ground,
+	float* __restrict__ weights_ptz,
+	float* __restrict__ weights_drone,
 	float* __restrict__ final_T,
 	uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ bg_color,
-	float* __restrict__ out_color,
-	float* __restrict__ out_depth, 
-	float* __restrict__ out_xy,
-	float* __restrict__ masks)
+	float* __restrict__ out_color)
 {
 	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
@@ -293,10 +290,6 @@ renderCUDA(
 	// Done threads can help with fetching, but don't rasterize
 	bool done = !inside;
 
-	// bool done = (pix_id > W*100 || !inside);
-	bool inmask = masks[pix_id]==1.0f;
-	// bool done = (masks[pix_id]==1.0f || !inside);
-
 	// Load start/end range of IDs to process in bit sorted list.
 	uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
 	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
@@ -306,21 +299,13 @@ renderCUDA(
 	__shared__ int collected_id[BLOCK_SIZE];
 	__shared__ float2 collected_xy[BLOCK_SIZE];
 	__shared__ float4 collected_conic_opacity[BLOCK_SIZE];
-	// __shared__ float collected_weights[BLOCK_SIZE];
 
 	// Initialize helper variables
 	float T = 1.0f;
 	uint32_t contributor = 0;
 	uint32_t last_contributor = 0;
+	float C[CHANNELS] = { 0 };
 
-	float D = 0.0f;
-	float XY[2] = { 0 };
-	float C[CHANNELS] = {0};
-
-	float WEIGHT[1] = {0};
-    WEIGHT[0] = masks[pix_id];
-
-	
 	// Iterate over batches until all done or range is complete
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
 	{
@@ -337,8 +322,6 @@ renderCUDA(
 			collected_id[block.thread_rank()] = coll_id;
 			collected_xy[block.thread_rank()] = points_xy_image[coll_id];
 			collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
-			// collected_weights[block.thread_rank()] = weights[coll_id];
-
 		}
 		block.sync();
 
@@ -353,10 +336,10 @@ renderCUDA(
 			float2 xy = collected_xy[j];
 			float2 d = { xy.x - pixf.x, xy.y - pixf.y };
 			float4 con_o = collected_conic_opacity[j];
-			// float sem_weight = collected_weights[j];
 			float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
 			if (power > 0.0f)
 				continue;
+
 			// Eq. (2) from 3D Gaussian splatting paper.
 			// Obtain alpha by multiplying with Gaussian opacity
 			// and its exponential falloff from mean.
@@ -370,28 +353,30 @@ renderCUDA(
 				done = true;
 				continue;
 			}
-
+			
 			// Eq. (3) from 3D Gaussian splatting paper.
-			for (int ch = 0; ch < CHANNELS; ch++)
-				{
-				 C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
-				 }
-			D += depths[collected_id[j]] * alpha * T;
-			XY[0] += points_xy_image[collected_id[j]].x * alpha * T;
-			XY[1] += points_xy_image[collected_id[j]].y * alpha * T;
-			atomicAdd(weights + collected_id[j], WEIGHT[0]* T);
-        	atomicAdd(weights_cnt + collected_id[j], 1);
-			// printf("WEIGHT[0] %d, T %f \n", WEIGHT[0], T);
+			// Define constant float variables with the respective values
+		const float zero = 0.0f;
+		const float one = 1.0f;
+		const float two = 2.0f;
 
-			// if (inmask){
-			// 	sem_weight += 1.0;
-			// 	*out_weights += sem_weight;
-			// }
-			// for (int ch = 0; ch < CHANNELS; ch++) {
-        	// atomicAdd(weights + (collected_id[j] * CHANNELS + ch), WEIGHT[ch]);
-			// atomicAdd(out_weights + (collected_id[j] * CHANNELS + ch), WEIGHT[ch]);
-			// // out_weights = weights;
-			// }
+		// Inside the loop
+		for (int ch = 0; ch < CHANNELS; ch++) {
+			const float *weights = nullptr;
+
+			// Determine which weights array to use based on altitude
+			if (altitude == &zero)
+				weights = weights_ground;
+			else if (altitude == &one)
+				weights = weights_ptz;
+			else if (altitude == &two)
+				weights = weights_drone;
+			else
+				weights = &zero;  // Use the pointer to the constant float zero if altitude is not 0, 1, or 2
+
+			// Add the contribution to C[ch]
+			C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T * weights[collected_id[j]];
+		}
 			T = test_T;
 
 			// Keep track of last range entry to update this
@@ -399,19 +384,6 @@ renderCUDA(
 			last_contributor = contributor;
 		}
 	}
-	// if (pix_id == 0 && masks[pix_id] == 1.0f) {
-	// 	// The condition is met when the masks tensor is loaded correctly,
-	// 	// and the first pixel's mask value is 1.0f.
-	// 	// Set the first pixel's color to a distinct value (e.g., bright red).
-	// 	if (inside) {
-	// 		final_T[pix_id] = 1.0f; // Assuming final_T represents transparency/coverage
-	// 		out_color[0 * H * W + pix_id] = 1.0f; // Red channel
-	// 		out_color[1 * H * W + pix_id] = 0.0f; // Green channel
-	// 		out_color[2 * H * W + pix_id] = 0.0f; // Blue channel
-	// 		out_depth[pix_id] = 0.0f; // Set some arbitrary depth value
-	// 	}
-	// 	return;
-	// }
 
 	// All threads that treat valid pixel write out their final
 	// rendering data to the frame and auxiliary buffers.
@@ -421,9 +393,6 @@ renderCUDA(
 		n_contrib[pix_id] = last_contributor;
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
-		out_depth[pix_id] = D;
-		out_xy[0 * H * W + pix_id] = XY[0];
-		out_xy[1 * H * W + pix_id] = XY[1];
 	}
 }
 
@@ -434,17 +403,16 @@ void FORWARD::render(
 	int W, int H,
 	const float2* means2D,
 	const float* colors,
-	const float* depths,
 	const float4* conic_opacity,
-	float* weights,
-	int* weights_cnt,
+	const float* altitude,
+	float* weights_ground,
+	float* weights_ptz,
+	float* weights_drone,
 	float* final_T,
 	uint32_t* n_contrib,
 	const float* bg_color,
-	float* out_color,
-	float* out_depth, 
-	float* out_xy,
-	float* masks)
+	float* out_color
+)
 {
 	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
 		ranges,
@@ -452,17 +420,15 @@ void FORWARD::render(
 		W, H,
 		means2D,
 		colors,
-		depths,
 		conic_opacity,
-		weights,
-		weights_cnt,
+		altitude,
+		weights_ground,
+		weights_ptz,
+		weights_drone,
 		final_T,
 		n_contrib,
 		bg_color,
-		out_color,
-		out_depth, 
-		out_xy,
-		masks);
+		out_color);
 }
 
 void FORWARD::preprocess(int P, int D, int M,

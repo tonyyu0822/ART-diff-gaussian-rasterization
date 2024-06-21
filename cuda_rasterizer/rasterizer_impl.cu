@@ -61,9 +61,8 @@ __global__ void checkFrustum(int P,
 	if (idx >= P)
 		return;
 
-	float dist = 0.0f;
 	float3 p_view;
-	present[idx] = in_frustum(idx, orig_points, viewmatrix, projmatrix, false, p_view, dist);
+	present[idx] = in_frustum(idx, orig_points, viewmatrix, projmatrix, false, p_view);
 }
 
 // Generates one key/value pair for all Gaussian / tile overlaps. 
@@ -207,8 +206,10 @@ int CudaRasterizer::Rasterizer::forward(
 	const float* shs,
 	const float* colors_precomp,
 	const float* opacities,
-    float* weights,
-	int* weights_cnt,
+	const float* altitude,
+	float* weights_ground,
+	float* weights_ptz,
+	float* weights_drone,
 	const float* scales,
 	const float scale_modifier,
 	const float* rotations,
@@ -219,10 +220,7 @@ int CudaRasterizer::Rasterizer::forward(
 	const float tan_fovx, float tan_fovy,
 	const bool prefiltered,
 	float* out_color,
-	float* out_depth,
-	float* out_xy,
-	float* masks, //ty
-	int* radii, 
+	int* radii,
 	bool debug)
 {
 	const float focal_y = height / (2.0f * tan_fovy);
@@ -291,7 +289,7 @@ int CudaRasterizer::Rasterizer::forward(
 	BinningState binningState = BinningState::fromChunk(binning_chunkptr, num_rendered);
 
 	// For each instance to be rendered, produce adequate [ tile | depth ] key 
-	// and corresponding duplicated Gaussian indices to be sorted
+	// and corresponding dublicated Gaussian indices to be sorted
 	duplicateWithKeys << <(P + 255) / 256, 256 >> > (
 		P,
 		geomState.means2D,
@@ -332,16 +330,12 @@ int CudaRasterizer::Rasterizer::forward(
 		width, height,
 		geomState.means2D,
 		feature_ptr,
-		geomState.depths,
 		geomState.conic_opacity,
-		weights, weights_cnt,
+		altitude,weights_ground,weights_ptz,weights_drone,
 		imgState.accum_alpha,
 		imgState.n_contrib,
 		background,
-		out_color,
-		out_depth, 
-		out_xy,
-		masks), debug)
+		out_color), debug)
 
 	return num_rendered;
 }
@@ -368,8 +362,6 @@ void CudaRasterizer::Rasterizer::backward(
 	char* binning_buffer,
 	char* img_buffer,
 	const float* dL_dpix,
-	const float* dL_depths,
-	const float* dL_xys, 
 	float* dL_dmean2D,
 	float* dL_dconic,
 	float* dL_dopacity,
@@ -400,7 +392,6 @@ void CudaRasterizer::Rasterizer::backward(
 	// opacity and RGB of Gaussians from per-pixel loss gradients.
 	// If we were given precomputed colors and not SHs, use them.
 	const float* color_ptr = (colors_precomp != nullptr) ? colors_precomp : geomState.rgb;
-	const float* depth_ptr = geomState.depths;
 	CHECK_CUDA(BACKWARD::render(
 		tile_grid,
 		block,
@@ -409,22 +400,21 @@ void CudaRasterizer::Rasterizer::backward(
 		width, height,
 		background,
 		geomState.means2D,
-		(float3*)means3D,
 		geomState.conic_opacity,
+		altitude,
+		weights_ground,
+		weights_ptz,
+		weights_drone,
 		color_ptr,
-		depth_ptr,
 		imgState.accum_alpha,
 		imgState.n_contrib,
-		viewmatrix, 
-		projmatrix, 
-		(glm::vec3*)campos,
 		dL_dpix,
-		dL_depths,
-		dL_xys, 
 		(float3*)dL_dmean2D,
-		(float3*)dL_dmean3D, 
 		(float4*)dL_dconic,
 		dL_dopacity,
+		dL_dweights_ground,
+		dL_dweights_ptz,
+		dL_dweights_drone,
 		dL_dcolor), debug)
 
 	// Take care of the rest of preprocessing. Was the precomputed covariance

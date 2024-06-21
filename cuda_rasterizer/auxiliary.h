@@ -76,16 +76,6 @@ __forceinline__ __device__ float4 transformPoint4x4(const float3& p, const float
 	return transformed;
 }
 
-__forceinline__ __device__ float3 transformPoint4x4Transpose(const float4& p, const float* matrix)
-{
-	float3 transformed = {
-		matrix[0] * p.x + matrix[1] * p.y + matrix[2] * p.z + matrix[3] * p.w,
-		matrix[4] * p.x + matrix[5] * p.y + matrix[6] * p.z + matrix[7] * p.w,
-		matrix[8] * p.x + matrix[9] * p.y + matrix[10] * p.z + matrix[11] * p.w,
-	};
-	return transformed;
-}
-
 __forceinline__ __device__ float3 transformVec4x3(const float3& p, const float* matrix)
 {
 	float3 transformed = {
@@ -151,8 +141,7 @@ __forceinline__ __device__ bool in_frustum(int idx,
 	const float* viewmatrix,
 	const float* projmatrix,
 	bool prefiltered,
-	float3& p_view, 
-	float& dist)
+	float3& p_view)
 {
 	float3 p_orig = { orig_points[3 * idx], orig_points[3 * idx + 1], orig_points[3 * idx + 2] };
 
@@ -161,8 +150,8 @@ __forceinline__ __device__ bool in_frustum(int idx,
 	float p_w = 1.0f / (p_hom.w + 0.0000001f);
 	float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w };
 	p_view = transformPoint4x3(p_orig, viewmatrix);
-	dist = glm::length(glm::vec3(p_view.x, p_view.y, p_view.z));
-	if (p_view.z <= 0.2f)// dist <= 0.2f || ((p_proj.x < -1.3 || p_proj.x > 1.3 || p_proj.y < -1.3 || p_proj.y > 1.3)))
+
+	if (p_view.z <= 0.2f)// || ((p_proj.x < -1.3 || p_proj.x > 1.3 || p_proj.y < -1.3 || p_proj.y > 1.3)))
 	{
 		if (prefiltered)
 		{
